@@ -1,21 +1,19 @@
 
 
-********************** Prepare the Data
+********************** Prepare the Data for Local Projections analysis
+
 **** Required STATA Packages 
 ssc install tsspell  // sirve para detectar rachas o secuencias en datos de series temporales (ej. varios meses seguidos de sequía)
 ssc install gammafit // ajusta una distribución Gamma a los datos de precipitación, que es la base para calcular el índice SPI (Standardized Precipitation Index)
 
 ********************** Import the Data from raw_files folder and merge using combine.ado file 
-global github_path "https://raw.githubusercontent.com/MilesIParker/GoingNUTS/main"
+global github_path "https://raw.githubusercontent.com/javierperezcano/Climate-Shocks/main"
 // crea una variable global que guarda la dirección del repositorio de GitHub donde están los datos y códigos del paper
 
 *ADO file 
-combine, saveas("raw_data_only_SPAIN.dta")  
+combine_only_SPAIN, saveas("raw_data_only_SPAIN.dta")
 // combine descarga todos los ficheros de datos climáticos (CSV) desde GitHub, los une en un solo dataset los guarda en la memoria de Stata y también localmente para no tener que descargarlos otra vez.
 
-
-*describe // variables y tipos
-*browse   // abre visor de datos interactivo
 
 ********************** Define the global variables 
 
@@ -29,23 +27,9 @@ global Country_ID Country_ID
 global Territory_ID Territory_ID
 
 ********************** Rename variables for merging with macroeconomic variables
+rename ïtime time
 rename cntr_code ${Country_ID}
 rename nuts_id ${Territory_ID}
-
-* Keep EU27 sample 
-*  "AT" "BE" "BG" "HR" "CY" "CZ" "DK" "EE" "FI" "FR" "DE" "EL" "HU" "IE" "IT" "LV" "LT" "LU" "MT"  "NL"  "PL" "PT" "RO" "SK" "SI"  "ES" "SE" 
-*** drop non-EU27 Countries 
-drop if ${Country_ID} == "CH" 
-drop if ${Country_ID} ==  "IS" 
-drop if ${Country_ID} ==  "ME"
-drop if ${Country_ID} == "NO" 
-drop if ${Country_ID} == "TR" 
-drop if ${Country_ID} == "UK" 
-drop if ${Country_ID} == "RS"
-drop if ${Country_ID} == "AL"
-drop if ${Country_ID} == "MK"
-drop if ${Country_ID} == "LI"
-
 
 * Formating the Date variable 
 gen date = date(time, "YMD")   // convierte la variable "time" (que está como texto YYYYMMDD) en fecha numérica de Stata
@@ -56,17 +40,13 @@ gen month = month(date)        // extrae el mes (1=enero, ..., 12=diciembre)
 
 gen calenderyear = yq(year,quarter)   // crea variable de tiempo en formato "año-trimestre" (ej. 2010q1)
 format calenderyear %tq               // le da formato de fecha trimestral para que Stata lo interprete bien
-sort ${Territory_ID} year quarter month // ordena el dataset por territorio, año, trimestre y mes
+sort ${Territory_ID} date // ordena el dataset por territorio, año, trimestre y mes
 gen int t_var = ym(year, month)       // crea variable de tiempo en formato "año-mes" como número entero (útil para paneles)
 format t_var %tm                      // le da formato de fecha mensual legible
-
-
 
 * Drop missing data 
 destring pr_mean t_mean, replace
 drop if missing(pr_mean) & missing(t_mean) // drop missing values 
-list Territory_ID if missing(pr_mean) // check which territories drop out 
-
 
 * Redefine quarters based on Seasons
 gen meteo_quarter = .                               // crea variable vacía para el trimestre meteorológico
@@ -82,26 +62,51 @@ gen meteoyear = yq(meteo_only_year,meteo_quarter)   // crea variable de año-tri
 format meteoyear %tq    
 
 ***************** Defining the heatwaves 
-destring t_diff_1991_2020, replace dpcomma ignore(" ")
-bysort ${Country_ID} ${Territory_ID} meteo_only_year: egen annual_avg_temp_dev = mean(t_diff_1991_2020) 
+
+**destring t_diff_1991_2020, replace dpcomma ignore(" ")
+**bysort ${Country_ID} ${Territory_ID} meteo_only_year: egen annual_avg_temp_dev = mean(t_diff_1991_2020) 
 // calcula la desviación anual media de la temperatura respecto al periodo 1991-2020 por país, territorio y año meteorológico
+
+
+***** Quarterly
+
+** Generate long run means both for meteorological and calendar year
+** Calcula la climatología histórica 1991–2020 por territorio y trimestre (meteo o calendario según el bloque). Promedia todas las observaciones de 1991–2020 dentro de cada grupo (p.ej., "Madrid–verano", primer bloque, o "Madrid-junio,julio y agosto, segundo bloque), y guarda un único valor constante por grupo. Será la referencia para calcular anomalías (observado – climatología).
 
 * Generate long run mean (1991_2020) for meteorological year in each quarter 
 egen aux = mean(t_mean) if meteo_only_year > 1990 & meteo_only_year < 2021 & meteo_only_year !=.  , by (${Territory_ID} meteo_quarter) 
 // obtiene la temperatura media histórica (1991-2020) por territorio y trimestre meteorológico
-
-
 egen meteor_avgtemp_quarter_hist = min(aux) , by (${Territory_ID} meteo_quarter) 
 // guarda ese promedio como valor constante para cada territorio-trimestre
-drop aux 
+drop aux
 
 * Generate long run mean (1991_2020) for calendar year in each quarter 
 egen aux = mean(t_mean) if year > 1990 & year < 2021 & year !=.  , by (${Territory_ID} quarter) 
 // obtiene la temperatura media histórica (1991-2020) por territorio y trimestre calendario
 egen calendar_avgtemp_quarter_hist = min(aux) , by (${Territory_ID} quarter) 
 // guarda ese promedio como valor constante para cada territorio-trimestre calendario
-sort ${Territory_ID} meteo_only_year meteo_quarter
 drop aux 
+
+** Generate quarterly absolute temperature averages both for meteorological and calendar year 
+** Calcula la media trimestral observada en cada año específico por territorio (meteo o calendario según el bloque). Promedia las observaciones de los meses que forman cada trimestre dentro de ese año (p.ej., "Madrid–invierno 2015", primer bloque, o "Madrid–Q1 2015", segundo bloque), y guarda un valor distinto para cada territorio–año–trimestre. Será el valor observado que luego se compara con la climatología para obtener anomalías (observado – climatología).
+
+egen temp_meteo_quarter = mean(t_mean), by (${Territory_ID} meteo_quarter meteo_only_year)  
+// calcula la temperatura media trimestral absoluta agrupando por territorio + trimestre meteorológico (dic–feb, mar–may, jun–ago, sep–nov) + año meteorológico (diciembre cuenta para el año siguiente)  
+// resultado: la temperatura media de invierno/primavera/verano/otoño en cada año meteorológico y territorio  
+egen temp_quarter = mean (t_mean), by (${Territory_ID} quarter year)  
+// calcula la temperatura media trimestral absoluta agrupando por territorio + trimestre calendario (Q1=ene–mar, Q2=abr–jun, Q3=jul–sep, Q4=oct–dic) + año calendario  
+// resultado: la temperatura media de cada trimestre calendario en cada año y territorio  
+
+
+
+** Generate quarterly deviations from long run mean 
+gen temp_meteo_quarter_dev = temp_meteo_quarter -  meteor_avgtemp_quarter_hist   // desviación trimestral de la media histórica (1991-2020) usando trimestres meteorológicos
+gen temp_calendar_quarter_dev = temp_quarter - calendar_avgtemp_quarter_hist     // desviación trimestral de la media histórica (1991-2020) usando trimestres calendario
+
+
+***** Monthly
+
+** Generate long run means both for meteorological and calendar year
 
 * Generate long run mean (1991_2020) for meteorological year in each month 
 egen aux = mean(t_mean) if meteo_only_year > 1990 & meteo_only_year < 2021 & meteo_only_year !=.  , by (${Territory_ID} month) 
@@ -110,13 +115,21 @@ egen meteor_avgtemp_month_hist = min(aux) , by (${Territory_ID} month)
 // guarda ese promedio como valor constante para cada territorio-mes
 drop aux 
 
-* Generate quarterly absolute temperature averages both for meteorological and calendar year 
-egen temp_meteo_quarter = mean(t_mean), by (${Territory_ID} meteo_quarter meteo_only_year) // calcula la temperatura media trimestral absoluta por año meteorológico
-egen temp_quarter = mean (t_mean), by (${Territory_ID} quarter year) // calcula la temperatura media trimestral absoluta por año calendario
+* Generate long run mean (1991_2020) for calendar year in each month 
+egen aux = mean(t_mean) if year > 1990 & year < 2021 & year !=.  , by (${Territory_ID} month) 
+// obtiene la temperatura media histórica (1991-2020) por territorio y mes calendario
+egen calendar_avgtemp_month_hist = min(aux) , by (${Territory_ID} month) 
+// guarda ese promedio como valor constante para cada territorio-mes calendario
+drop aux 
 
-* Generate quarterly deviations from long run mean 
-gen temp_meteo_quarter_dev = temp_meteo_quarter -  meteor_avgtemp_quarter_hist   // desviación trimestral de la media histórica (1991-2020) usando trimestres meteorológicos
-gen temp_calendar_quarter_dev = temp_quarter - calendar_avgtemp_quarter_hist     // desviación trimestral de la media histórica (1991-2020) usando trimestres calendario
+
+** Generate monthly absolute temperature averages both for meteorological and calendar year 
+egen temp_meteo_month = mean(t_mean), by (month meteo_only_year) // calcula la temperatura media mensual absoluta por año meteorológico
+egen temp_month = mean (t_mean), by (month year) // calcula la temperatura media mensual absoluta por año calendario
+
+* Generate monthly deviations from long run mean 
+gen temp_meteo_month_dev = temp_meteo_month -  meteor_avgtemp_month_hist   // desviación mensual de la media histórica (1991-2020) usando meses
+gen temp_calendar_month_dev = temp_month - calendar_avgtemp_month_hist     // desviación trimestral de la media histórica (1991-2020) usando meses calendario
 
 ****************** Create weather dummies
 
@@ -130,39 +143,44 @@ gen autumn = .
 replace autumn = 1 if meteo_quarter ==4
 
 
-**** variables for heat shocks 
+**** Variables for heat shocks 
 
 
-*Baseline 
+***** Quarterly (only for meteorological calendar)
 
+** Baseline 
+
+* Verano
 gen  hotsummer_2C =. 
 replace hotsummer_2C = 1 if  temp_meteo_quarter_dev >2 & summer==1 &  temp_meteo_quarter_dev!=.
+// Marca con 1 aquellos veranos en los que la temperatura media trimestral estuvo más de 2 °C por encima de lo normal en un territorio y año dados. Más en detalle, asigna el valor 1 a la variable hotsummer_2C bajo la condición de que la desviación de temperatura en el trimestre meteorológico (temp_meteo_quarter_dev) sea mayor a 2 °C respecto a la climatología 1991–2020. Además, el trimestre debe ser verano (junio–agosto) y la variable no puede estar vacía (se evita asignar valores a los missing).
 replace hotsummer_2C = 1 if temp_meteo_quarter_dev == 2 & summer==1 & temp_meteo_quarter_dev!=.
 replace hotsummer_2C = 0 if  temp_meteo_quarter_dev<2 & summer==1 &  temp_meteo_quarter_dev!=.
 
+* Otoño
 gen  hotautumn_2C =. 
 replace hotautumn_2C = 1 if  temp_meteo_quarter_dev >2 & autumn==1 &  temp_meteo_quarter_dev!=.
 replace hotautumn_2C = 1 if temp_meteo_quarter_dev == 2 & autumn==1 & temp_meteo_quarter_dev!=.
 replace hotautumn_2C = 0 if  temp_meteo_quarter_dev<2 & autumn==1 &  temp_meteo_quarter_dev!=.
 
+* Invierno
 gen  hotwinter_2C =. 
 replace hotwinter_2C = 1 if  temp_meteo_quarter_dev >2 & winter==1 &  temp_meteo_quarter_dev!=.
 replace hotwinter_2C = 1 if temp_meteo_quarter_dev == 2 & winter==1 & temp_meteo_quarter_dev!=.
 replace hotwinter_2C = 0 if  temp_meteo_quarter_dev<2 & winter==1 &  temp_meteo_quarter_dev!=.
 
+* Primavera
 gen  hotspring_2C =. 
 replace hotspring_2C = 1 if  temp_meteo_quarter_dev >2 & spring==1 &  temp_meteo_quarter_dev!=.
 replace hotspring_2C = 1 if temp_meteo_quarter_dev == 2 & spring==1 & temp_meteo_quarter_dev!=.
 replace hotspring_2C = 0 if  temp_meteo_quarter_dev<2 & spring==1 &  temp_meteo_quarter_dev!=.
 
-*Robustness check 1.75
+** Robustness check 1.75
 
 gen  hotsummer_175C =. 
 replace hotsummer_175C = 1 if  temp_meteo_quarter_dev >1.75 & summer==1 &  temp_meteo_quarter_dev!=.
 replace hotsummer_175C = 1 if temp_meteo_quarter_dev == 1.75 & summer==1 & temp_meteo_quarter_dev!=.
 replace hotsummer_175C = 0 if  temp_meteo_quarter_dev<1.75 & summer==1 &  temp_meteo_quarter_dev!=.
-
-
 
 gen  hotautumn_175C =. 
 replace hotautumn_175C = 1 if  temp_meteo_quarter_dev >1.75 & autumn==1 &  temp_meteo_quarter_dev!=.
@@ -180,7 +198,7 @@ replace hotspring_175C = 1 if temp_meteo_quarter_dev == 1.75 & spring==1 & temp_
 replace hotspring_175C = 0 if  temp_meteo_quarter_dev<1.75 & spring==1 &  temp_meteo_quarter_dev!=.
 
 
-*Robustness check 2.25
+** Robustness check 2.25
 
 gen  hotsummer_225C =. 
 replace hotsummer_225C = 1 if  temp_meteo_quarter_dev >2.25 & summer==1 &  temp_meteo_quarter_dev!=.
@@ -209,6 +227,8 @@ replace hotspring_225C = 0 if  temp_meteo_quarter_dev<2.25 & spring==1 &  temp_m
 replace hotspring_225C = 0 if  temp_meteo_quarter_dev<-2.25 & spring==1 &  temp_meteo_quarter_dev!=.
 
 
+*********************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************
+****************************************************** ACTUALIZADO HASTA AQUÍ ************************************************************** ********************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************
 
 
 ****************** Defining the floods 
